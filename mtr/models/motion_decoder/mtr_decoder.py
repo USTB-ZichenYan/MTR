@@ -79,6 +79,7 @@ class MTRDecoder(nn.Module):
 
         self.forward_ret_dict = {}
 
+    # 初始化dense_future_prediction_layers
     def build_dense_future_prediction_layers(self, hidden_dim, num_future_frames):
         self.obj_pos_encoding_layer = common_layers.build_mlps(
             c_in=2, mlp_channels=[hidden_dim, hidden_dim, hidden_dim], ret_before_act=True, without_norm=True
@@ -259,35 +260,55 @@ class MTRDecoder(nn.Module):
         return query_feature
 
     def apply_dynamic_map_collection(self, map_pos, map_mask, pred_waypoints, base_region_offset, num_query, num_waypoint_polylines=128, num_base_polylines=256, base_map_idxs=None):
+        """
+        根据输入的地图位置、掩码、预测轨迹点等信息，动态收集地图多段线索引。
+
+        参数:
+            map_pos (torch.Tensor): 地图多段线的位置信息，形状为 (num_center_objects, num_polylines, 2)。
+            map_mask (torch.Tensor): 地图多段线的有效性掩码，形状为 (num_center_objects, num_polylines)。
+            pred_waypoints (torch.Tensor): 预测的轨迹点，形状为 (num_center_objects, num_query, num_timestamps, 2)。
+            base_region_offset (list or tuple): 基础区域的偏移量，用于计算基础多段线索引。
+            num_query (int): 查询的数量，通常与预测轨迹点的数量相关。
+            num_waypoint_polylines (int): 动态收集的多段线数量上限，默认为 128。
+            num_base_polylines (int): 基础收集的多段线数量上限，默认为 256。
+            base_map_idxs (torch.Tensor, optional): 预先计算的基础多段线索引，形状为 (num_center_objects, num_query, num_base_polylines)。如果为 None，则会动态计算。
+
+        返回:
+            sorted_idxs (torch.Tensor): 去重后的多段线索引，形状为 (num_center_objects, num_query, num_collected_polylines)。
+            base_map_idxs (torch.Tensor): 基础多段线索引，形状为 (num_center_objects, num_query, num_base_polylines)。
+        """
+        # 复制地图位置信息，并将无效位置设置为极大值以排除影响
         map_pos = map_pos.clone()
         map_pos[~map_mask] = 10000000.0
         num_polylines = map_pos.shape[1]
 
+        # 如果未提供基础多段线索引，则根据基础区域偏移量动态计算
         if base_map_idxs is None:
             base_points = torch.tensor(base_region_offset).type_as(map_pos)
-            base_dist = (map_pos[:, :, 0:2] - base_points[None, None, :]).norm(dim=-1)  # (num_center_objects, num_polylines)
-            base_topk_dist, base_map_idxs = base_dist.topk(k=min(num_polylines, num_base_polylines), dim=-1, largest=False)  # (num_center_objects, topk)
-            base_map_idxs[base_topk_dist > 10000000] = -1
-            base_map_idxs = base_map_idxs[:, None, :].repeat(1, num_query, 1)  # (num_center_objects, num_query, num_base_polylines)
+            base_dist = (map_pos[:, :, 0:2] - base_points[None, None, :]).norm(dim=-1)  # 计算基础区域到每个多段线的距离
+            base_topk_dist, base_map_idxs = base_dist.topk(k=min(num_polylines, num_base_polylines), dim=-1, largest=False)  # 获取距离最近的多段线索引
+            base_map_idxs[base_topk_dist > 10000000] = -1  # 排除无效索引
+            base_map_idxs = base_map_idxs[:, None, :].repeat(1, num_query, 1)  # 扩展维度以匹配查询数量
             if base_map_idxs.shape[-1] < num_base_polylines:
-                base_map_idxs = F.pad(base_map_idxs, pad=(0, num_base_polylines - base_map_idxs.shape[-1]), mode='constant', value=-1)
+                base_map_idxs = F.pad(base_map_idxs, pad=(0, num_base_polylines - base_map_idxs.shape[-1]), mode='constant', value=-1)  # 填充至指定数量
 
-        dynamic_dist = (pred_waypoints[:, :, None, :, 0:2] - map_pos[:, None, :, None, 0:2]).norm(dim=-1)  # (num_center_objects, num_query, num_polylines, num_timestamps)
-        dynamic_dist = dynamic_dist.min(dim=-1)[0]  # (num_center_objects, num_query, num_polylines)
-
-        dynamic_topk_dist, dynamic_map_idxs = dynamic_dist.topk(k=min(num_polylines, num_waypoint_polylines), dim=-1, largest=False)
-        dynamic_map_idxs[dynamic_topk_dist > 10000000] = -1
+        # 计算预测轨迹点到地图多段线的动态距离，并获取最近的多段线索引
+        dynamic_dist = (pred_waypoints[:, :, None, :, 0:2] - map_pos[:, None, :, None, 0:2]).norm(dim=-1)  # 计算动态距离
+        dynamic_dist = dynamic_dist.min(dim=-1)[0]  # 取每个时间戳的最小距离
+        dynamic_topk_dist, dynamic_map_idxs = dynamic_dist.topk(k=min(num_polylines, num_waypoint_polylines), dim=-1, largest=False)  # 获取距离最近的多段线索引
+        dynamic_map_idxs[dynamic_topk_dist > 10000000] = -1  # 排除无效索引
         if dynamic_map_idxs.shape[-1] < num_waypoint_polylines:
-            dynamic_map_idxs = F.pad(dynamic_map_idxs, pad=(0, num_waypoint_polylines - dynamic_map_idxs.shape[-1]), mode='constant', value=-1)
+            dynamic_map_idxs = F.pad(dynamic_map_idxs, pad=(0, num_waypoint_polylines - dynamic_map_idxs.shape[-1]), mode='constant', value=-1)  # 填充至指定数量
 
-        collected_idxs = torch.cat((base_map_idxs, dynamic_map_idxs), dim=-1)  # (num_center_objects, num_query, num_collected_polylines)
+        # 合并基础和动态多段线索引
+        collected_idxs = torch.cat((base_map_idxs, dynamic_map_idxs), dim=-1)
 
-        # remove duplicate indices
+        # 去重合并后的多段线索引
         sorted_idxs = collected_idxs.sort(dim=-1)[0]
-        duplicate_mask_slice = (sorted_idxs[..., 1:] - sorted_idxs[..., :-1] != 0)  # (num_center_objects, num_query, num_collected_polylines - 1)
+        duplicate_mask_slice = (sorted_idxs[..., 1:] - sorted_idxs[..., :-1] != 0)  # 检测重复索引
         duplicate_mask = torch.ones_like(collected_idxs).bool()
         duplicate_mask[..., 1:] = duplicate_mask_slice
-        sorted_idxs[~duplicate_mask] = -1
+        sorted_idxs[~duplicate_mask] = -1  # 将重复索引标记为无效
 
         return sorted_idxs.int(), base_map_idxs
 
@@ -504,6 +525,17 @@ class MTRDecoder(nn.Module):
             pred_scores_final = pred_scores
 
         return pred_scores_final, pred_trajs_final
+    # 多模态场景：在运动预测中，一个对象（如车辆）的未来轨迹可能有多种可能的模式（如左转、直行、右转），num_query 表示模型生成的轨迹模式数量，self.num_motion_modes 表示最终需要保留的模式数量（通常 num_query > self.num_motion_modes）。
+    # 非极大值抑制（NMS）：
+    # batch_nms 函数：对每个中心对象的多个轨迹模式进行筛选，保留置信度高且不相似的轨迹。
+    # 核心参数：
+    # dist_thresh：距离阈值，若两条轨迹的距离小于该阈值，则认为它们相似，只保留分数更高的一条。
+    # num_ret_modes：最终保留的轨迹模式数量（即 self.num_motion_modes）。
+    # 输出：
+    # pred_trajs_final：筛选后的轨迹，形状为 (num_center_objects, num_motion_modes, num_future_timestamps, num_feat)。
+    # pred_scores_final：筛选后的分数，形状为 (num_center_objects, num_motion_modes)。
+    # selected_idxs：选中的轨迹索引（用于调试或可视化）。
+    # 单模态场景（Else 分支）：若 num_query == self.num_motion_modes（即无需筛选），直接返回原始预测结果。
 
     def forward(self, batch_dict):
         input_dict = batch_dict['input_dict']

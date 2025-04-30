@@ -109,6 +109,19 @@ class MTREncoder(nn.Module):
         x_pos_stack_full = x_pos.view(-1, 3)
         batch_idxs_full = torch.arange(batch_size).type_as(x)[:, None].repeat(1, N).view(-1).int()  # (batch_size * N)
 
+        # torch.arange(batch_size)：
+        # torch.arange 函数用于创建一个包含从 0 到 batch_size - 1 的等差序列的一维张量。例如，如果 batch_size 为 3，那么 torch.arange(batch_size) 将返回 tensor([0, 1, 2])。
+        # .type_as(x)：
+        # 这是一个方法调用，将上一步生成的张量的数据类型转换为与张量 x 相同的数据类型。这样可以确保后续的操作中数据类型的一致性。
+        # [:, None]：
+        # 这是一个索引操作，用于在第 1 维（索引为 1）上添加一个新的维度，将一维张量转换为二维张量。例如，对于张量 tensor([0, 1, 2])，[:, None] 操作后将变为 tensor([[0], [1], [2]])。
+        # .repeat(1, N)：
+        # repeat 方法用于重复张量的元素。这里 repeat(1, N) 表示在第 0 维上重复 1 次，在第 1 维上重复 N 次。对于上述二维张量 tensor([[0], [1], [2]])，经过 repeat(1, N) 操作后，假设 N 为 4，将变为 tensor([[0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2]])。
+        # .view(-1)：
+        # view 方法用于调整张量的形状。view(-1) 表示将张量展平为一维张量。对于上述二维张量 tensor([[0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2]])，经过 view(-1) 操作后将变为 tensor([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])。
+        # .int()：
+        # 这是一个方法调用，将张量的数据类型转换为整数类型（torch.int）。
+
         # filter invalid elements
         x_stack = x_stack_full[x_mask_stack]
         x_pos_stack = x_pos_stack_full[x_mask_stack]

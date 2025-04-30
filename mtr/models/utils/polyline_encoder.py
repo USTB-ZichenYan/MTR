@@ -25,8 +25,10 @@ class PointNetPolylineEncoder(nn.Module):
         
         if out_channels is not None:
             self.out_mlps = common_layers.build_mlps(
-                c_in=hidden_dim, mlp_channels=[hidden_dim, out_channels], 
-                ret_before_act=True, without_norm=True
+                c_in=hidden_dim, 
+                mlp_channels=[hidden_dim, out_channels], 
+                ret_before_act=True, 
+                without_norm=True
             )
         else:
             self.out_mlps = None 
@@ -42,7 +44,12 @@ class PointNetPolylineEncoder(nn.Module):
         batch_size, num_polylines,  num_points_each_polylines, C = polylines.shape
 
         # pre-mlp
-        polylines_feature_valid = self.pre_mlps(polylines[polylines_mask])  # (N, C)
+        polylines_feature_valid = self.pre_mlps(polylines[polylines_mask])  
+        # (N, C) 
+        # polylines[polylines_mask]：polylines 是输入的折线数据，
+        # 形状为 (batch_size, num_polylines, num_points_each_polylines, C)；
+        # polylines_mask 是对应的掩码，形状为 (batch_size, num_polylines, num_points_each_polylines)，
+        # 它是一个布尔类型的张量，用于标记哪些点是有效的。
         polylines_feature = polylines.new_zeros(batch_size, num_polylines,  num_points_each_polylines, polylines_feature_valid.shape[-1])
         polylines_feature[polylines_mask] = polylines_feature_valid
 
